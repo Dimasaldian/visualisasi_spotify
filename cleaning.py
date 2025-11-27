@@ -1,79 +1,55 @@
-# %% -------------------- IMPORT LIBRARIES --------------------
 import pandas as pd
 import numpy as np
 
-# %% -------------------- LOAD DATA --------------------
-# Ganti path ini sesuai file kamu
-file_path = "Most Streamed Spotify Songs 2024.csv"
+# 1. Load the original dataset dengan menambahkan 'encoding'
+# Menggunakan 'latin1' untuk mengatasi UnicodeDecodeError
+try:
+    df = pd.read_csv("Most Streamed Spotify Songs 2024.csv", encoding='latin1')
+except UnicodeDecodeError:
+    # Jika latin1 gagal, coba cp1252
+    df = pd.read_csv("Most Streamed Spotify Songs 2024.csv", encoding='cp1252')
 
-spotify = pd.read_csv(file_path, encoding="latin1")
+print("File berhasil dimuat.")
+print(f"Jumlah baris awal: {df.shape[0]}")
 
-print(spotify.info())
+# 2. Hapus Kolom dengan Persentase Missing Value Sangat Tinggi (>= 46%)
+columns_to_drop = [
+    'TIDAL Popularity',  # 100% missing
+    'Soundcloud Streams', # 72.46% missing
+    'SiriusXM Spins'     # 46.15% missing (Imputasi terlalu berisiko)
+]
+df = df.drop(columns=columns_to_drop, axis=1)
 
-# %% -------------------- 1. CLEAN COLUMN NAMES --------------------
-spotify.columns = (
-    spotify.columns
-    .str.replace(r"\.", "_", regex=True)
-    .str.lower()
-)
-
-# %% -------------------- 2. CONVERT NUMERIC COLUMNS --------------------
-numeric_cols = [
-    "all_time_rank", "spotify_streams", "spotify_playlist_reach",
-    "youtube_views", "youtube_playlist_reach",
-    "airplay_spins", "siriusxm_spins",
-    "deezer_playlist_reach",
-    "pandora_streams", "shazam_counts"
+# 3. Definisikan Kolom Numerik yang Perlu Dibersihkan (Hapus Koma dan Konversi ke Float)
+stream_count_cols = [
+    'Spotify Streams', 'Spotify Playlist Count', 'Spotify Playlist Reach',
+    'YouTube Views', 'YouTube Likes', 'TikTok Posts', 'TikTok Likes',
+    'TikTok Views', 'YouTube Playlist Reach', 'AirPlay Spins',
+    'Deezer Playlist Reach', 'Pandora Streams', 'Pandora Track Stations',
+    'Shazam Counts'
 ]
 
-for col in numeric_cols:
-    if col in spotify.columns:
-        spotify[col] = pd.to_numeric(spotify[col], errors="coerce")
+for col in stream_count_cols:
+    # Mengganti koma dan mengkonversi ke float.
+    df[col] = df[col].astype(str).str.replace(',', '', regex=False)
+    df[col] = pd.to_numeric(df[col], errors='coerce')
 
-# %% -------------------- 3. CONVERT RELEASE DATE --------------------
-if "release_date" in spotify.columns:
-    spotify["release_date"] = pd.to_datetime(
-        spotify["release_date"],
-        format="%m/%d/%Y",
-        errors="coerce"
-    )
+# 4. Imputasi Kolom Numerik dengan Median
+float_cols_for_imputation = df.select_dtypes(include=np.number).columns.tolist()
 
-# %% -------------------- 4. ALL TIME RANK AS ORDERED FACTOR --------------------
-if "all_time_rank" in spotify.columns:
-    spotify["all_time_rank_factor"] = (
-        spotify["all_time_rank"]
-        .rank(method="first", ascending=False)  # reverse order R-style
-        .astype(int)
-    )
+float_cols_for_imputation = [col for col in float_cols_for_imputation if col not in ['Track Score', 'Explicit Track']]
 
-# %% -------------------- 5. EXPLICIT TRACK LOGICAL --------------------
-if "explicit_track" in spotify.columns:
-    spotify["explicit_track_logical"] = spotify["explicit_track"].map({
-        0: False,
-        1: True
-    })
+for col in float_cols_for_imputation:
+    median_val = df[col].median()
+    df[col].fillna(median_val, inplace=True)
 
-# %% -------------------- CHECK MISSING VALUES --------------------
-print("\nMissing values per column:")
-print(spotify.isna().sum().sort_values(ascending=False))
+# 5. Menghapus Baris dengan NaN pada Kolom Kategorikal (Artist)
+df.dropna(subset=['Artist'], inplace=True)
 
-# %% -------------------- 6. DROP 'tidal_popularity' COLUMN --------------------
-if "tidal_popularity" in spotify.columns:
-    spotify = spotify.drop(columns=["tidal_popularity"])
+# 6. Verifikasi Akhir
+print(f"Jumlah baris setelah cleaning: {df.shape[0]}")
 
-# %% -------------------- 7. REPLACE NA WITH ZERO FOR NUMERIC COLUMNS --------------------
-num_cols = spotify.select_dtypes(include=["float64", "int64"]).columns
-spotify[num_cols] = spotify[num_cols].fillna(0)
-
-# %% -------------------- 8. REMOVE DUPLICATED ROWS --------------------
-before = len(spotify)
-spotify = spotify.drop_duplicates(keep="first")
-after = len(spotify)
-
-print(f"\nDuplicates removed: {before - after}")
-
-# %% -------------------- FINAL CHECK --------------------
-print("\nFinal dataset info:")
-print(spotify.info())
-
-# Dataset cleaned and ready to analyze
+# 7. Simpan Data yang Sudah Dibersihkan
+output_file = 'Most_Streamed_Spotify_Songs_2024_Cleaned_Median_Imputed.csv'
+df.to_csv(output_file, index=False)
+print(f"Data yang sudah dibersihkan tersimpan di: {output_file}")

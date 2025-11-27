@@ -1,53 +1,48 @@
-import math
 import pandas as pd
 import numpy as np
 import plotly.express as px
-import plotly.io as pio
+import plotly.graph_objects as go
 import streamlit as st
 
 # ==========================================================
-# 0. GLOBAL STYLE (Plotly)
+# 0. KONFIGURASI HALAMAN & STYLE
 # ==========================================================
+st.set_page_config(
+    page_title="Spotify Unified Dashboard",
+    page_icon="🟢",
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
+
+# Palet Warna
+COLOR_SPOTIFY = "#1DB954"
+COLOR_ACCENT = "#FF0055"   
+COLOR_YOUTUBE = "#FF0000"
+COLOR_TIKTOK = "#00F2EA"
+
+# Template Plotly
 px.defaults.template = "plotly_dark"
-px.defaults.color_discrete_sequence = px.colors.qualitative.Set2
-
-BG_DARK = "#191414"   # Spotify dark
-FG_TEXT = "white"
 
 # ==========================================================
-# 1. LOAD & CLEAN DATA
+# 1. LOAD & CLEAN DATA (MERGE DUPLICATES)
 # ==========================================================
-
 @st.cache_data
 def load_data(csv_path: str) -> pd.DataFrame:
-    df = pd.read_csv(csv_path, encoding="latin1")
+    try:
+        df = pd.read_csv(csv_path, encoding='latin1')
+    except:
+        try:
+            df = pd.read_csv(csv_path)
+        except Exception as e:
+            st.error(f"Gagal membaca file: {e}")
+            return pd.DataFrame()
 
-    # Bersihkan whitespace nama kolom
     df.columns = df.columns.str.strip()
 
-    # Numeric fields yang punya koma pemisah ribuan
+    # 1. Cleaning Kolom Numerik
     numeric_fields = [
-        "Spotify Streams",
-        "Spotify Playlist Count",
-        "Spotify Playlist Reach",
-        "Spotify Popularity",
-        "YouTube Views",
-        "YouTube Likes",
-        "TikTok Posts",
-        "TikTok Likes",
-        "TikTok Views",
-        "YouTube Playlist Reach",
-        "Apple Music Playlist Count",
-        "AirPlay Spins",
-        "SiriusXM Spins",
-        "Deezer Playlist Count",
-        "Deezer Playlist Reach",
-        "Amazon Playlist Count",
-        "Pandora Streams",
-        "Pandora Track Stations",
-        "Soundcloud Streams",
-        "Shazam Counts",
-        "TIDAL Popularity",
+        "Spotify Streams", "Spotify Playlist Count", "Spotify Playlist Reach",
+        "Spotify Popularity", "YouTube Views", "TikTok Views", "AirPlay Spins"
     ]
 
     for col in numeric_fields:
@@ -56,373 +51,288 @@ def load_data(csv_path: str) -> pd.DataFrame:
                 df[col].astype(str)
                 .str.replace(",", "", regex=False)
                 .replace("nan", np.nan)
+                .replace("None", np.nan)
             )
             df[col] = pd.to_numeric(df[col], errors="coerce")
 
-    # Parse tanggal
+    # 2. Parse Tanggal
     if "Release Date" in df.columns:
-        df["Release Date"] = pd.to_datetime(
-            df["Release Date"], format="%m/%d/%Y", errors="coerce"
-        )
+        df["Release Date"] = pd.to_datetime(df["Release Date"], errors="coerce")
         df["Year"] = df["Release Date"].dt.year
-
-    # Label tampilan: Track – Artist
-    df["SongLabel"] = df["Track"].astype(str) + " – " + df["Artist"].astype(str)
-
-    # Explicit boolean
+        df["Month"] = df["Release Date"].dt.month_name()
+    
+    # 3. Explicit Boolean
     if "Explicit Track" in df.columns:
-        df["Explicit"] = df["Explicit Track"].astype(int).replace({1: True, 0: False})
+        df["Explicit"] = df["Explicit Track"].apply(lambda x: True if x == 1 else False)
     else:
         df["Explicit"] = False
 
-    return df
+    # =================================================================
+    # 4. AGREGASI (PENGGABUNGAN DATA)
+    # =================================================================
+    # Buat kolom 'Key' bersih untuk pengelompokan (lowercase)
+    df['Track_Clean'] = df['Track'].astype(str).str.lower().str.strip()
+    df['Artist_Clean'] = df['Artist'].astype(str).str.lower().str.strip()
 
+    # Aturan penggabungan: Ambil nilai MAX untuk angka, agar tidak double counting
+    agg_rules = {
+        'Spotify Streams': 'max',           
+        'Spotify Playlist Count': 'max',    
+        'Spotify Playlist Reach': 'max',
+        'Spotify Popularity': 'max',
+        'YouTube Views': 'max',
+        'TikTok Views': 'max',
+        'AirPlay Spins': 'max',
+        'Track': 'first',                   # Ambil nama asli yg pertama
+        'Artist': 'first',
+        'Year': 'first',
+        'Month': 'first',
+        'Explicit': 'max',                  # Jika salah satu True, jadikan True
+    }
+    
+    # Hanya gunakan aturan untuk kolom yang benar-benar ada
+    valid_agg_rules = {k: v for k, v in agg_rules.items() if k in df.columns}
 
-df = load_data("Most Streamed Spotify Songs 2024.csv")
+    # Lakukan Grouping -> Lagu dengan judul & artis sama akan DILEBUR jadi satu
+    df_merged = df.groupby(['Track_Clean', 'Artist_Clean'], as_index=False).agg(valid_agg_rules)
+    
+    # Buat Label Lagu
+    df_merged["SongLabel"] = df_merged["Track"].astype(str) + " – " + df_merged["Artist"].astype(str)
 
+    return df_merged
+
+df = load_data("Most_Streamed_Spotify_Songs_2024_Cleaned_Median_Imputed.csv")
 
 # ==========================================================
-# 2. PAGE SETUP & FILTER
+# 2. SIDEBAR FILTER
 # ==========================================================
+st.sidebar.title("🟢 Spotify Analytics")
 
-st.set_page_config(page_title="Spotify Dashboard", layout="wide")
-st.sidebar.title("⚙️ Filter Dataset")
-
-# Filter tahun
-if "Year" in df.columns:
+# Filter Tahun
+if "Year" in df.columns and not df["Year"].isnull().all():
     min_y = int(df["Year"].min())
     max_y = int(df["Year"].max())
-
-    year_rng = st.sidebar.slider(
-        "Filter Tahun Rilis",
+    default_start = 2015 if min_y < 2015 else min_y
+    
+    year_range = st.sidebar.slider(
+        "📅 Tahun Rilis",
         min_value=min_y,
         max_value=max_y,
-        value=(min_y, max_y),
+        value=(default_start, max_y)
     )
-    df = df[df["Year"].between(year_rng[0], year_rng[1])]
-
-# Filter explicit
-filter_explicit = st.sidebar.radio(
-    "Filter Explicit",
-    ("Semua", "Explicit", "Non Explicit")
-)
-
-if filter_explicit == "Explicit":
-    df = df[df["Explicit"] == True]
-elif filter_explicit == "Non Explicit":
-    df = df[df["Explicit"] == False]
-
-# Top N
-top_n = st.sidebar.slider("Top N Ranking", 5, 50, 10, 5)
-
-
-# ==========================================================
-# 3. HEADER KPIs
-# ==========================================================
-
-st.title("🎧 Spotify Most Streamed Songs 2024 Dashboard")
-
-total_streams = df["Spotify Streams"].sum()
-total_streams_B = total_streams / 1e9 if not np.isnan(total_streams) else 0
-
-# jumlah rekaman unik → pakai ISRC kalau ada
-if "ISRC" in df.columns:
-    total_tracks = df["ISRC"].nunique()
+    df_filtered = df[df["Year"].between(year_range[0], year_range[1])]
 else:
-    total_tracks = df["Track"].nunique()
+    df_filtered = df.copy()
 
-total_artists = df["Artist"].nunique()
+# Filter Explicit
+explicit_filter = st.sidebar.radio(
+    "🔞 Tipe Konten", ["Semua", "Hanya Explicit", "Non-Explicit"]
+)
+if explicit_filter == "Hanya Explicit":
+    df_filtered = df_filtered[df_filtered["Explicit"] == True]
+elif explicit_filter == "Non-Explicit":
+    df_filtered = df_filtered[df_filtered["Explicit"] == False]
 
-col1, col2, col3 = st.columns(3)
-col1.metric("📀 Total Stream Spotify", f"{total_streams_B:.2f} B")
-col2.metric("🎵 Jumlah Track (ISRC)", int(total_tracks))
-col3.metric("👤 Jumlah Artist", int(total_artists))
+top_n = st.sidebar.number_input("🏆 Top Ranking", 5, 50, 10)
 
-st.markdown("---")
-
+st.sidebar.markdown("---")
+st.sidebar.caption("Data: Lagu duplikat telah digabungkan (Merged) menjadi satu entitas.")
 
 # ==========================================================
-# 4. TOP SONGS (Per ISRC)
+# 3. KPI METRICS
 # ==========================================================
+st.title("🎧 Analisis Lengkap Lagu Top Spotify")
 
-st.subheader(f"🏆 Top {top_n} Most Streamed Songs (Per ISRC)")
+total_streams = df_filtered["Spotify Streams"].sum()
+total_reach = df_filtered["Spotify Playlist Reach"].sum()
+avg_pop = df_filtered["Spotify Popularity"].mean()
 
-top_songs = (
-    df.sort_values("Spotify Streams", ascending=False)
-      .head(top_n)
-      .copy()
-)
-
-top_songs["Streams_B"] = top_songs["Spotify Streams"] / 1e9
-
-fig_isrc = px.bar(
-    top_songs,
-    x="Streams_B",
-    y="SongLabel",
-    orientation="h",
-    color_discrete_sequence=["#1DB954"],  # Spotify green
-    labels={
-        "SongLabel": "",
-        "Streams_B": "Spotify Streams (B)"
-    },
-)
-
-fig_isrc.update_traces(
-    text=top_songs["Streams_B"].round(2).astype(str) + "B",
-    textposition="outside"
-)
-
-fig_isrc.update_layout(
-    plot_bgcolor=BG_DARK,
-    paper_bgcolor=BG_DARK,
-    font_color=FG_TEXT,
-    xaxis=dict(
-        tickformat=".2f",
-        title="Spotify Streams (B)",
-    ),
-    yaxis=dict(
-        categoryorder='array',
-        categoryarray=list(top_songs["SongLabel"]),
-        title=""
-    ),
-    margin=dict(l=180, r=40, t=10, b=10),
-    showlegend=False,
-)
-
-st.plotly_chart(fig_isrc, use_container_width=True, key="chart_top_songs")
-
-
-# ==========================================================
-# 5. TOP ARTISTS (aggregate)
-# ==========================================================
-
-st.subheader("🎤 Top Artists berdasarkan Total Spotify Streams")
-
-top_artists = (
-    df.groupby("Artist", as_index=False)["Spotify Streams"]
-      .sum()
-      .sort_values("Spotify Streams", ascending=False)
-      .head(top_n)
-      .copy()
-)
-
-top_artists["Streams_B"] = top_artists["Spotify Streams"] / 1e9
-
-fig2 = px.bar(
-    top_artists,
-    x="Streams_B",
-    y="Artist",
-    orientation="h",
-    color_discrete_sequence=["#1DB954"],
-    labels={
-        "Artist": "",
-        "Streams_B": "Spotify Streams (B)"
-    },
-)
-
-fig2.update_traces(
-    text=top_artists["Streams_B"].round(2).astype(str) + "B",
-    textposition="outside"
-)
-
-fig2.update_layout(
-    plot_bgcolor=BG_DARK,
-    paper_bgcolor=BG_DARK,
-    font_color=FG_TEXT,
-    yaxis=dict(autorange="reversed"),
-    margin=dict(l=160, r=40, t=10, b=10),
-    showlegend=False,
-)
-
-st.plotly_chart(fig2, use_container_width=True, key="chart_top_artists")
-
-st.markdown("---")
-
-
-# ==========================================================
-# 6. LINE — AVG POPULARITY PER 5 TAHUN
-# ==========================================================
-
-st.subheader("📈 Rata-rata Popularity per Era (5 Tahun)")
-
-def era_5(y):
-    if pd.isna(y):
-        return np.nan
-    y = int(y)
-    base = (y // 5) * 5
-    return f"{base}-{base+4}"
-
-if "Spotify Popularity" in df.columns and "Year" in df.columns:
-    df["Era"] = df["Year"].apply(era_5)
-
-    era_view = (
-        df.dropna(subset=["Era"])
-          .groupby("Era", as_index=False)["Spotify Popularity"]
-          .mean()
-    )
-
-    fig3 = px.line(
-        era_view,
-        x="Era",
-        y="Spotify Popularity",
-        markers=True,
-        labels={"Era": "Era (5 Tahun)", "Spotify Popularity": "Avg Popularity"},
-    )
-    fig3.update_layout(
-        plot_bgcolor=BG_DARK,
-        paper_bgcolor=BG_DARK,
-        font_color=FG_TEXT,
-        margin=dict(l=60, r=40, t=20, b=40),
-    )
-    st.plotly_chart(fig3, use_container_width=True, key="chart_era_pop")
+if not df_filtered.empty:
+    top_track = df_filtered.loc[df_filtered["Spotify Streams"].idxmax()]
+    top_name = top_track["Track"]
 else:
-    st.info("Kolom Year atau Spotify Popularity tidak tersedia.")
+    top_name = "-"
+
+col1, col2, col3, col4 = st.columns(4)
+col1.metric("Total Spotify Streams", f"{total_streams/1e9:.2f} B")
+col2.metric("Total Playlist Reach", f"{total_reach/1e9:.2f} B")
+col3.metric("Avg Popularity", f"{avg_pop:.0f}/100")
+col4.metric("👑 Lagu #1", top_name)
 
 st.markdown("---")
 
-
 # ==========================================================
-# 7. PIE – Explicit vs Non Explicit
+# 4. CHART SECTION
 # ==========================================================
+tab1, tab2, tab3 = st.tabs(["📊 Top Charts", "📅 Tren & Waktu", "💡 Insight Konten"])
 
-st.subheader("🔞 Proporsi Explicit vs Non-Explicit")
-
-exp_data = (
-    df["Explicit"]
-    .value_counts()
-    .rename(index={True: "Explicit", False: "Non Explicit"})
-    .reset_index()
-)
-exp_data.columns = ["Type", "Count"]
-
-fig4 = px.pie(
-    exp_data,
-    names="Type",
-    values="Count",
-    hole=0.45,
-    color="Type",
-    color_discrete_map={
-        "Explicit": "#FF2E63",
-        "Non Explicit": "#1DB954",
-    },
-)
-
-fig4.update_traces(textinfo="percent+label")
-fig4.update_layout(
-    plot_bgcolor=BG_DARK,
-    paper_bgcolor=BG_DARK,
-    font_color=FG_TEXT,
-    margin=dict(l=40, r=40, t=20, b=20),
-    showlegend=True,
-)
-
-st.plotly_chart(fig4, use_container_width=True, key="chart_explicit")
-
-st.markdown("---")
-
-
-# ==========================================================
-# 8. SCATTER TikTok vs Spotify
-# ==========================================================
-
-st.subheader("📊 Viralitas vs Konsumsi — TikTok Views vs Spotify Streams")
-
-if "TikTok Views" in df.columns:
-
-    mode = st.selectbox(
-        "Level Data Scatter",
-        ("Per Lagu (rekaman/ISRC)", "Per Artist"),
-        help="Per Lagu: 1 titik = 1 baris/rekaman. Per Artist: agregasi per artist."
-    )
-
-    if mode.startswith("Per Lagu"):
-        dscatter = df.copy()
-        hover = "SongLabel"
-        color_col = "Artist"
-    else:
-        dscatter = (
-            df.groupby("Artist", as_index=False)[["TikTok Views", "Spotify Streams"]]
-              .sum()
+# --- TAB 1: LEADERBOARD ---
+with tab1:
+    c1, c2 = st.columns(2)
+    
+    # CHART 1: TOP SONGS
+    with c1:
+        st.subheader(f"1️⃣ Top {top_n} Lagu (Streams)")
+        df_songs = df_filtered.nlargest(top_n, "Spotify Streams").copy()
+        
+        df_songs["Val_B"] = df_songs["Spotify Streams"] / 1e9
+        df_songs["Text_B"] = df_songs["Val_B"].apply(lambda x: f"{x:.2f}B")
+        
+        fig1 = px.bar(
+            df_songs, y="SongLabel", x="Val_B", orientation='h',
+            text="Text_B", color_discrete_sequence=[COLOR_SPOTIFY]
         )
-        dscatter["SongLabel"] = dscatter["Artist"]
-        hover = "Artist"
-        color_col = "Artist"
+        fig1.update_traces(textposition='outside')
+        
+        # PERBAIKAN: Menambahkan Title X-Axis yang Jelas
+        fig1.update_layout(
+            yaxis={'title': '', 'categoryorder':'total ascending'}, 
+            xaxis={'showticklabels': False, 'title': 'Total Streams (Billions)'}, # Title Jelas
+            margin=dict(r=50)
+        )
+        st.plotly_chart(fig1, use_container_width=True)
+        
+    # CHART 2: TOP ARTISTS
+    with c2:
+        st.subheader(f"2️⃣ Top {top_n} Artis (Total Streams)")
+        df_art = df_filtered.groupby("Artist")["Spotify Streams"].sum().nlargest(top_n).reset_index()
+        
+        df_art["Val_B"] = df_art["Spotify Streams"] / 1e9
+        df_art["Text_B"] = df_art["Val_B"].apply(lambda x: f"{x:.2f}B")
+        
+        fig2 = px.bar(
+            df_art, y="Artist", x="Val_B", orientation='h',
+            text="Text_B", color_discrete_sequence=[COLOR_SPOTIFY]
+        )
+        fig2.update_traces(textposition='outside')
+        
+        # PERBAIKAN: Menambahkan Title X-Axis yang Jelas
+        fig2.update_layout(
+            yaxis={'title': '', 'categoryorder':'total ascending'}, 
+            xaxis={'showticklabels': False, 'title': 'Total Streams (Billions)'}, # Title Jelas
+            margin=dict(r=50)
+        )
+        st.plotly_chart(fig2, use_container_width=True)
 
-    dscatter = dscatter.replace(0, np.nan).dropna(
-        subset=["TikTok Views", "Spotify Streams"]
+# --- TAB 2: TIME SERIES ---
+with tab2:
+    st.subheader("3️⃣ Evolusi Popularitas & Streams")
+    
+    df_trend = df_filtered.groupby("Year").agg({
+        "Spotify Streams": "mean",
+        "Spotify Popularity": "mean",
+        "Track": "count"
+    }).reset_index()
+
+    c3, c4 = st.columns(2)
+    
+    with c3:
+        fig3 = px.line(
+            df_trend, x="Year", y="Spotify Popularity",
+            markers=True, title="Rata-rata Popularitas per Tahun Rilis"
+        )
+        fig3.update_traces(line_color=COLOR_ACCENT, line_width=4)
+        fig3.update_layout(
+            yaxis=dict(range=[0, 100], title="Avg Popularity"), 
+            xaxis_title="Tahun Rilis",
+            hovermode="x unified"
+        )
+        st.plotly_chart(fig3, use_container_width=True)
+
+    with c4:
+        fig4 = px.bar(
+            df_trend, x="Year", y="Track",
+            title="Jumlah Lagu Top yang Rilis per Tahun",
+            color_discrete_sequence=[COLOR_SPOTIFY]
+        )
+        fig4.update_layout(xaxis_title="Tahun Rilis", yaxis_title="Jumlah Lagu")
+        st.plotly_chart(fig4, use_container_width=True)
+        
+    st.markdown("---")
+    
+    st.subheader("4️⃣ Bulan Favorit Rilis Lagu")
+    if "Month" in df_filtered.columns:
+        month_order = [
+            'January', 'February', 'March', 'April', 'May', 'June', 
+            'July', 'August', 'September', 'October', 'November', 'December'
+        ]
+        existing_months = df_filtered["Month"].dropna().unique()
+        month_order_exist = [m for m in month_order if m in existing_months]
+        
+        df_month = df_filtered["Month"].value_counts().reindex(month_order_exist).reset_index()
+        df_month.columns = ["Bulan", "Jumlah Lagu"]
+        
+        fig5 = px.bar(
+            df_month, x="Bulan", y="Jumlah Lagu",
+            color="Jumlah Lagu", color_continuous_scale="Greens"
+        )
+        fig5.update_layout(xaxis_title="Bulan", yaxis_title="Jumlah Lagu")
+        st.plotly_chart(fig5, use_container_width=True)
+
+# --- TAB 3: CONTENT & CONTEXT ---
+with tab3:
+    c5, c6 = st.columns(2)
+    
+    with c5:
+        st.subheader("5️⃣ Performa Lagu Explicit")
+        df_exp = df_filtered.groupby("Explicit")["Spotify Streams"].mean().reset_index()
+        df_exp["Tipe"] = df_exp["Explicit"].map({True: "Explicit (18+)", False: "Non-Explicit"})
+        
+        fig6 = px.pie(
+            df_exp, names="Tipe", values="Spotify Streams",
+            title="Rata-rata Streams: Explicit vs Clean",
+            color="Tipe",
+            color_discrete_map={"Explicit (18+)": COLOR_ACCENT, "Non-Explicit": COLOR_SPOTIFY},
+            hole=0.4
+        )
+        st.plotly_chart(fig6, use_container_width=True)
+        
+    with c6:
+        st.subheader("6️⃣ Dampak Playlist Reach")
+        fig7 = px.scatter(
+            df_filtered, x="Spotify Playlist Reach", y="Spotify Streams",
+            color="Spotify Popularity", size="Spotify Popularity",
+            hover_name="SongLabel",
+            log_x=True, log_y=True,
+            title="Korelasi Reach vs Streams (Log Scale)",
+            color_continuous_scale="Greens"
+        )
+        fig7.update_layout(xaxis_title="Playlist Reach (Log)", yaxis_title="Streams (Log)")
+        st.plotly_chart(fig7, use_container_width=True)
+
+    st.markdown("---")
+    
+    st.subheader("7️⃣ Konteks Platform Lain (Top 10 Songs)")
+    
+    df_compare = df_filtered.nlargest(10, "Spotify Streams")
+    cols = ["SongLabel", "Spotify Streams", "YouTube Views", "TikTok Views"]
+    existing_cols = [c for c in cols if c in df_filtered.columns]
+    
+    df_melt = df_compare[existing_cols].melt("SongLabel", var_name="Platform", value_name="Views")
+    
+    fig8 = px.bar(
+        df_melt, x="SongLabel", y="Views", color="Platform",
+        barmode="group",
+        color_discrete_map={
+            "Spotify Streams": COLOR_SPOTIFY,
+            "YouTube Views": COLOR_YOUTUBE,
+            "TikTok Views": COLOR_TIKTOK
+        }
     )
-
-    if not dscatter.empty:
-        fig5 = px.scatter(
-            dscatter,
-            x="TikTok Views",
-            y="Spotify Streams",
-            size="Spotify Streams",
-            hover_name=hover,
-            color=color_col,
-            size_max=22,
-            labels={
-                "TikTok Views": "TikTok Views (log)",
-                "Spotify Streams": "Spotify Streams (log)",
-            },
-        )
-        fig5.update_xaxes(type="log")
-        fig5.update_yaxes(type="log")
-        fig5.update_layout(
-            plot_bgcolor=BG_DARK,
-            paper_bgcolor=BG_DARK,
-            font_color=FG_TEXT,
-            margin=dict(l=60, r=40, t=20, b=40),
-        )
-        st.plotly_chart(fig5, use_container_width=True, key="chart_tiktok_scatter")
-    else:
-        st.info("Data scatter kosong setelah filter.")
-else:
-    st.info("Kolom TikTok Views tidak tersedia.")
-
-st.markdown("---")
-
+    fig8.update_layout(yaxis_type="log", xaxis_title="", yaxis_title="Views (Log Scale)")
+    st.plotly_chart(fig8, use_container_width=True)
 
 # ==========================================================
-# 9. HEATMAP Korelasi
+# 5. DATA TABLE
 # ==========================================================
-
-st.subheader("🧠 Korelasi antar Platform & Metric")
-
-corr_fields = [
-    "Spotify Streams",
-    "Spotify Playlist Reach",
-    "Spotify Popularity",
-    "YouTube Views",
-    "TikTok Views",
-    "TikTok Likes",
-    "Shazam Counts",
-    "Soundcloud Streams",
-    "AirPlay Spins",
-    "SiriusXM Spins",
-    "Pandora Streams",
-]
-
-corr_fields = [c for c in corr_fields if c in df.columns]
-
-if len(corr_fields) >= 2:
-    corr = df[corr_fields].corr()
-
-    fig6 = px.imshow(
-        corr,
-        text_auto=True,
-        color_continuous_scale="RdBu_r",
-        zmin=-1,
-        zmax=1,
+with st.expander("📂 Lihat Data Detail"):
+    st.dataframe(
+        df_filtered
+        .sort_values("Spotify Streams", ascending=False)
+        .style.format({
+            "Spotify Streams": "{:,.0f}",
+            "YouTube Views": "{:,.0f}",
+            "TikTok Views": "{:,.0f}",
+            "Spotify Popularity": "{:.1f}"
+        })
     )
-    fig6.update_layout(
-        plot_bgcolor=BG_DARK,
-        paper_bgcolor=BG_DARK,
-        font_color=FG_TEXT,
-        margin=dict(l=80, r=40, t=40, b=40),
-    )
-    st.plotly_chart(fig6, use_container_width=True, key="chart_corr_heatmap")
-else:
-    st.info("Tidak cukup kolom numerik untuk membuat korelasi.")
-
-st.markdown("Dashboard selesai 🎉 silakan explore 🙌")
